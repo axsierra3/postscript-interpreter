@@ -101,6 +101,7 @@ def tokenize(input)
         end
     end
 
+    $logger.debug("Tokenize: Input line tokenized to #{tokens}")
     tokens #returns the list of tokens for this input string line
 end
 
@@ -118,34 +119,42 @@ def interpret(tokens)
         #PARSE CODE BLOCK: push to operand stack
         # it will only be executed later when a command like if/repeat calls it
         if token.start_with?('{') 
+            $logger.debug("Interpret: Pushing #{token} onto stack as code block")
             $op_stack.push(token) 
 
         #PARSE STRING: push to operand stack without the parentheses
         elsif token.start_with?('(')
+            $logger.debug("Interpret: Pushing #{token} onto stack as string")
             $op_stack.push(token[1..-2]) #strip off the parentheses and push just the string content
 
         #PARSE BOOLEAN: push to operand stack as Ruby boolean
         elsif token == 'true'
+            $logger.debug("Interpret: Pushing boolean true onto stack")
             $op_stack.push(true)
         elsif token == 'false'
+            $logger.debug("Interpret: Pushing boolean false onto stack")
             $op_stack.push(false)
 
         #PARSE INTEGER: push to operand stack as Ruby int
         elsif token =~ /^-?\d+$/  # regex to match an optional negative sign followed by digits
+            $logger.debug("Interpret: Pushing integer onto stack: #{token}")
             $op_stack.push(token.to_i) # to_i converts string number to integer
 
         #PARSE FLOAT: push to operand stack as Ruby float
         elsif token =~ /^-?\d+\.\d+$/ # regex to match an optional negative sign, digits, a decimal point, and more digits
+             $logger.debug("Interpret: Pushing float onto stack: #{token}")
             $op_stack.push(token.to_f) # to_f converts string number to float
 
         #PARSE NAME CONSTANT: push to operand stack as string 
         # variable names like /x or /myvar 
         elsif token.start_with?('/')
+            $logger.debug("Interpret: Pushing name constant onto stack: #{token}")
             $op_stack.push(token)       #push and keep /
 
         #PARSE COMMAND OR VARIABLE LOOKUP --everything else
         # pass to execute_command
         else 
+            $logger.debug("Interpret: Passing to execute_command: #{token}")
             execute_command(token)
         end       
     end   
@@ -153,10 +162,11 @@ end
 
 
 #EXECUTE_COMMAND
-# Called when a token us not a constant, it is either a command or variabke name
+# Called when a token us not a constant, it is either a command or variabLe name
 # first checks if token is a PostScript command ('when' branches) 
 # if no command branch matches, it must be a variable name, call lookup() to find it in the dictionary stack (else block)
 def execute_command(token)
+    $logger.debug("Execute_command: called with #{token}")
     case token
 #------STACK MANIPULATION COOMMANDS------
         when 'pop'
@@ -289,11 +299,13 @@ def execute_command(token)
             dict = $op_stack.pop
             raise TypeMismatch, "begin requires a dictionary" unless dict.is_a?(Hash)
             $dict_stack.push(dict)
+            $logger.debug("Begin: Entered new namespace/scope, pushed to dictionary stack | dict stack size: #{$dict_stack.size}")
 
         when 'end'
             # pops the top dictionary off the dict stack, discarding the current namespace/scope
             # never pop the last/global dictionary
             raise TypeMismatch, "end: cannot pop global dictionary from dictionary stack" if $dict_stack.size <= 1
+            $logger.debug("End: Exited scope/namespace | dict stack size: #{$dict_stack.size}")
             $dict_stack.pop
 
         when 'def'
@@ -304,7 +316,16 @@ def execute_command(token)
             key = $op_stack.pop
             raise TypeMismatch, "def requires a name constant (starting with /)" unless key.is_a?(String) && key.start_with?('/')
             key = key[1..]  # strip the / off the front, so /x becomes x
-            $dict_stack.last[key] = value 
+
+            #storing the key-val pair in dict stack
+             if $lexical_scope && value.is_a?(String) && value.start_with?('{')
+                # if lexical scoping and value is in a code block, store as array: [code_block, definition_dict]
+                $dict_stack.last[key] = [value, $dict_stack.last]
+             else
+                $dict_stack.last[key] = value       #otherwise just store the value in current dict
+             end
+             $logger.debug("Def: Defined '#{key}' a var in current dict | dict stack size: #{$dict_stack.size}")
+             $logger.debug("Def: Current dict: #{$dict_stack.last.reject { |k,_| k == :parent }}")
 
         when 'length'
             # pushes total # of key-value pairs currently in dictionary
@@ -549,6 +570,17 @@ def execute_command(token)
                 puts val    # everything else prints normally
             end
 
+#LEXICAL AND DYNAMIC SCOPING TOGGLING
+        when 'setlexical'
+        #switches interpreter to lexical/static scoping
+        $lexical_scope = true
+        puts "Scoping mode: lexical"
+
+        when 'setdynamic'
+        #switches interpreter back to dynamic scoping
+        $lexical_scope = false
+        puts "Scoping mode: dynamic"
+
         else 
             lookup(token) # if token doesnt mathc any built-in command, search the dictionary stack to push its value onto operand stack (if found)
     end
@@ -559,47 +591,59 @@ end
 # Called by execute_command when a token isn't a built-in PostScript command
 # Searches the dictionary stack from top to bottom for the variable name matching the token
 # Dynamic scoping -- searches entire dict stack top to bottom for first match (invoker)
-# Lexical/static scoping -- follows parent chain from current dict upward (definer)
+# Lexical/static scoping -- follows parent chain from current dict to where it was defined and upward (parent)
 # if found: either execute it (code block) or push its value onto operand stack (constant)
 # if not found: raise ParseFailed because token is not valid constant, command, or variable name
 
 def lookup(token)
+    $logger.debug("Lookup: Looking up #{token} | scoping type: #{$lexical_scope ? 'lexical' : 'dynamic'}")
+    $logger.debug("Lookup: Dict stack: #{$dict_stack.map { |d| d.reject { |k,_| k == :parent } }}")
     if $lexical_scope 
-        #flag activated, follow parent chain
-        current_dict = $dict_stack.last  #start with dictuonary at top of dict stack
+        current_dict = $dict_stack.last  #current dictionary in scope
         while current_dict != nil
-            #if key name matches token
             if current_dict.key?(token) 
-                value = current_dict[token]  #get the value assocaiated 
-                #if vakue is a code block, take it apart and execute
-                if value.is_a?(String) && value.start_with?('{')
-                    interpret(tokenize(value[1..-2]))  #remove its curly brackets, tokenize it, and call interpret on each element token to execute
-                else 
-                    $op_stack.push(value) #otherwise push constant onto operand stack
+                value = current_dict[token]
+                # lexical closure -- execute in definition environment
+                # if val is an array, that means that def stored a code block with its parent 
+                # nessecary for lookup to resolve variable look ups in the parent, not just '.last'
+                if value.is_a?(Array) && value.length == 2 && value[0].is_a?(String) && value[0].start_with?('{')
+                    code_block = value[0]
+                    parent_dict = value[1]
+                    saved_dict_stack = $dict_stack.dup #save a copy of actual current dict stack before we mess w/ it
+                    def_index = $dict_stack.index(parent_dict) #find where in dict stack the parent dict actually lives
+                    #cut dict stack down to just up to the definition/parent point
+                    if def_index
+                        $dict_stack.replace($dict_stack[0..def_index]) #now when interpret runs it will only see the parent scope and the parent chain before it
+                    end
+                    interpret(tokenize(code_block[1..-2]))
+                    $dict_stack.replace(saved_dict_stack) #restore original dict stack
+                elsif value.is_a?(String) && value.start_with?('{')
+                    # plain code block -- execute normally
+                    interpret(tokenize(value[1..-2]))
+                else
+                    # plain value -- push onto stack
+                    $op_stack.push(value)
                 end
-                return  #found it - stop searching
-            end 
-            current_dict = current_dict[:parent] #move pointer up to parent dict (:parent is a special symbol/key we use to link to the parent dictionary)
+                return  
+            end         
+            current_dict = current_dict[:parent]
         end
+        raise ParseFailed, "undefined token: '#{token}' not found in any dictionary"
     else 
-        # dynamic scoping -- search dict stack from from top to bottom (searching invoker is same as following call chain at runtime)
         $dict_stack.reverse_each do |dict| 
             if dict.key?(token)
                 value = dict[token]
-                # if value is a code block, tokenize it and call interpret to execute it
                 if value.is_a?(String) && value.start_with?('{')
                     interpret(tokenize(value[1..-2])) 
                 else 
-                    $op_stack.push(value) #push  value onto operand stack
+                    $op_stack.push(value)
                 end  
-                return  #found it - stop searching
+                return
             end  
         end
-        #token wasnt found anywhere, parsing failed
         raise ParseFailed, "undefined token: '#{token}' not found in any dictionary"    
     end  
 end
-
 # REPL
 # Read-Eval-Print Loop
 # Reads a line of input typed by user, tokenizes it, interpets and evaluates it, and loops back

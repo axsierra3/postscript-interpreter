@@ -99,6 +99,15 @@ class TestStackCommands < Minitest::Test
         assert_equal [], $op_stack
     end
 
+    def test_copy
+        $op_stack.push(1)
+        $op_stack.push(2)
+        $op_stack.push(3)
+        $op_stack.push(2)
+        execute_command('copy')
+        assert_equal [1, 2, 3, 2, 3], $op_stack
+    end
+
     def test_pop_underflow
         assert_raises(StackUnderflow) { execute_command('pop') }
     end
@@ -639,6 +648,35 @@ class TestOutput < Minitest::Test
     def test_print_underflow
         assert_raises(StackUnderflow) { execute_command('print') }
     end
+end
+
+#------DYNAMIC VS LEXICAL SCOPING TESTS-------
+class TestScoping < Minitest::Test
+
+    def setup
+        reset  
+    end
+
+    def test_dynamic_scoping
+        $dict_stack.first["x"] = 10         #get first item in array (global) and store x as a key for 10
+        $dict_stack.push({"x" => 99})       # push a brand new dict onto the dict stack
+                                            # now dict stack is [{x:10}, {x:99}]
+        lookup("x")                         #lookup x dynamically
+        assert_equal [99], $op_stack        #should find x=99 first (top of stack = invoker)
+    end
+
+    def test_lexical_scoping
+        $lexical_scope = true
+        $dict_stack.first["getX"] = ["{ x }", $dict_stack.first]  #store getX in global dict as a lexical closure (getX maps to x codeblock and its defining/parent dict, global here)
+        $dict_stack.first["x"] = 10                             #store x=10 in global dict (where getX was defined)
+        new_dict = {"x" => 99, :parent => $dict_stack.first}    
+        $dict_stack.push(new_dict)                              #push a new dictionary with x=99 (the invokers scope) & global as parent
+        lookup("getX")                                          #lookup getX -- finds the closure
+                                                                #executes {x} in definition/parent enviorment (global)
+        assert_equal [10], $op_stack                            #should find x=10 not x=99                           
+        $lexical_scope = false
+    end
+        
 end
 
 
